@@ -1,11 +1,18 @@
+
+## **Updated config.py**
+
+
 # config.py
 from datetime import time
 
-# Attendance windows - MODIFY THESE TIMES
-CHECK_IN_START = time(23, 15)   # 7:00 PM (change hour, minute)
-CHECK_IN_END = time(23, 55)    # 11:59 PM
-CHECK_OUT_START = time(23, 56)  # 1:00 PM (change hour, minute)
-CHECK_OUT_END = time(23, 59)   # 6:59 PM
+# Attendance windows - Configure these times
+# Check-in window (evening/night)
+CHECK_IN_START = time(19, 0)   # 7:00 PM
+CHECK_IN_END = time(23, 59)    # 11:59 PM
+
+# Check-out window (afternoon/evening)
+CHECK_OUT_START = time(13, 0)  # 1:00 PM
+CHECK_OUT_END = time(18, 59)   # 6:59 PM
 
 # Email configuration
 import os
