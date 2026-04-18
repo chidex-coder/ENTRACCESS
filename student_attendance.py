@@ -1,11 +1,12 @@
 """Standalone Student Attendance Scanner App"""
 import streamlit as st
-import cv2
-import numpy as np
 from datetime import datetime
 import sys
 import os
 import time
+import io
+from PIL import Image
+import numpy as np
 
 # Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -16,6 +17,14 @@ from database import (
     update_email_status, get_connection
 )
 from email_service import email_service
+
+# Try to import QR code reader (fallback to manual entry if not available)
+try:
+    from pyzbar.pyzbar import decode
+    QR_SCANNER_AVAILABLE = True
+except ImportError:
+    QR_SCANNER_AVAILABLE = False
+    st.warning("QR scanner not available. Using manual entry mode.")
 
 # Page configuration
 st.set_page_config(
@@ -38,7 +47,6 @@ st.markdown(hide_menu_style, unsafe_allow_html=True)
 # Custom CSS for student scanner
 st.markdown("""
 <style>
-    /* Animated gradient header */
     .main-header {
         font-size: 2.5rem;
         font-weight: 900;
@@ -57,7 +65,6 @@ st.markdown("""
         100% { background-position: 0% 50%; }
     }
     
-    /* Mode indicator cards */
     .mode-card {
         padding: 20px;
         border-radius: 15px;
@@ -71,54 +78,52 @@ st.markdown("""
         to { transform: translateY(0); opacity: 1; }
     }
     
-    /* Success animation */
+    .success-box {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 15px;
+        text-align: center;
+        margin: 20px 0;
+        animation: successPulse 0.5s ease;
+    }
+    
     @keyframes successPulse {
         0% { transform: scale(1); }
         50% { transform: scale(1.02); }
         100% { transform: scale(1); }
     }
     
-    .success-box {
-        animation: successPulse 0.5s ease;
-    }
-    
-    /* Scanner container */
-    .scanner-container {
-        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    .warning-box {
+        background: #fef3c7;
         padding: 20px;
-        border-radius: 20px;
+        border-radius: 15px;
+        border-left: 5px solid #f59e0b;
         margin: 20px 0;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
     }
     
-    /* Status badge */
-    .status-badge {
-        display: inline-block;
-        padding: 8px 20px;
-        border-radius: 50px;
-        font-weight: 600;
-        margin: 10px 0;
+    .info-box {
+        background: #e0f2fe;
+        padding: 20px;
+        border-radius: 15px;
+        border-left: 5px solid #0ea5e9;
+        margin: 20px 0;
     }
     
-    /* Instruction card */
+    .qr-upload-container {
+        border: 2px dashed #667eea;
+        border-radius: 15px;
+        padding: 20px;
+        text-align: center;
+        background: #f8f9ff;
+    }
+    
     .instruction-card {
         background: white;
         padding: 20px;
         border-radius: 15px;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         margin: 15px 0;
-    }
-    
-    /* Time display */
-    .time-display {
-        text-align: center;
-        font-size: 1.2rem;
-        font-weight: 600;
-        color: #333;
-        background: rgba(255,255,255,0.9);
-        padding: 10px;
-        border-radius: 10px;
-        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -127,15 +132,33 @@ def get_current_mode():
     """Determine current operating mode."""
     now = datetime.now().time()
     
-    # Check-in window: 7 PM to 11:59 PM (19:00 to 23:59)
     if CHECK_IN_START <= now <= CHECK_IN_END:
         return "check_in", "✅ CHECK-IN MODE", "#10b981", "You can check in now"
-    # Check-out window: 1 PM to 6:59 PM (13:00 to 18:59)
     elif CHECK_OUT_START <= now <= CHECK_OUT_END:
         return "check_out", "✅ CHECK-OUT MODE", "#f59e0b", "You can check out now"
     else:
         next_mode = "Check-in at 7:00 PM" if now < CHECK_IN_START else "Check-in tomorrow at 7:00 PM"
         return "inactive", "⏰ SCANNER INACTIVE", "#6b7280", f"Scanner closed. {next_mode}"
+
+def decode_qr_from_image(image):
+    """Decode QR code from uploaded image using pyzbar"""
+    if not QR_SCANNER_AVAILABLE:
+        return None
+    
+    try:
+        # Convert PIL image to numpy array
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+        
+        # Decode QR code
+        decoded_objects = decode(image)
+        
+        if decoded_objects:
+            return decoded_objects[0].data.decode('utf-8')
+        return None
+    except Exception as e:
+        st.error(f"Error decoding QR code: {str(e)}")
+        return None
 
 def process_attendance(qr_data, mode):
     """Process attendance based on current mode."""
@@ -152,7 +175,6 @@ def process_attendance(qr_data, mode):
         result = process_check_in(student_id, qr_data)
         
         if result['success']:
-            # Send email confirmation
             email_sent = email_service.send_check_in_confirmation(
                 student_email, student_name, result['timestamp']
             )
@@ -174,7 +196,6 @@ def process_attendance(qr_data, mode):
         result = process_check_out(student_id, qr_data)
         
         if result['success']:
-            # Send email confirmation
             email_sent = email_service.send_check_out_confirmation(
                 student_email, student_name,
                 result['check_in_time'], result['timestamp'],
@@ -216,8 +237,8 @@ def scanner_page():
     # Display current time
     current_time = datetime.now()
     st.markdown(f"""
-    <div class="time-display">
-        🕐 Current Time: {current_time.strftime('%I:%M:%S %p')} | 📅 {current_time.strftime('%B %d, %Y')}
+    <div style="text-align: center; font-size: 1.2rem; font-weight: 600; padding: 10px;">
+        🕐 {current_time.strftime('%I:%M:%S %p')} | 📅 {current_time.strftime('%B %d, %Y')}
     </div>
     """, unsafe_allow_html=True)
     
@@ -225,8 +246,8 @@ def scanner_page():
         st.warning("⚠️ Scanner is currently closed. Please check back during operating hours.")
         st.info(f"""
         **Operating Hours:**
-        - **Check-in:** 7:00 PM - 11:59 PM
-        - **Check-out:** 1:00 PM - 6:59 PM
+        - **Check-in:** {CHECK_IN_START.strftime('%I:%M %p')} - {CHECK_IN_END.strftime('%I:%M %p')}
+        - **Check-out:** {CHECK_OUT_START.strftime('%I:%M %p')} - {CHECK_OUT_END.strftime('%I:%M %p')}
         
         Current time: {current_time.strftime('%I:%M %p')}
         """)
@@ -243,65 +264,57 @@ def scanner_page():
         st.session_state.last_result = None
     
     # Input method selection
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        input_method = st.radio(
-            "Select Input Method",
-            ["📷 Camera Scan", "⌨️ Manual Entry"],
-            horizontal=True,
-            label_visibility="collapsed"
-        )
+    input_method = st.radio(
+        "Select Input Method",
+        ["📷 Upload QR Code Image", "⌨️ Manual Entry"],
+        horizontal=True
+    )
     
     qr_data = None
     
-    if input_method == "📷 Camera Scan":
-        st.markdown('<div class="scanner-container">', unsafe_allow_html=True)
+    if input_method == "📷 Upload QR Code Image":
+        st.markdown('<div class="qr-upload-container">', unsafe_allow_html=True)
         
-        # Auto-scan indicator
         st.markdown("""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; padding: 12px; border-radius: 10px; 
                     text-align: center; margin-bottom: 15px;">
-            <span style="font-size: 1.1rem;">⚡ Auto-scan mode active - QR codes processed instantly!</span>
+            <span style="font-size: 1.1rem;">📸 Upload a photo of your QR code</span>
         </div>
         """, unsafe_allow_html=True)
         
-        # Show scan counter
-        if st.session_state.scan_count > 0:
-            st.markdown(f"""
-            <div style="text-align: right; margin-bottom: 10px;">
-                <span class="status-badge" style="background: #e0f2fe;">
-                    📊 Today's scans: {st.session_state.scan_count}
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
+        uploaded_file = st.file_uploader(
+            "Choose a QR code image",
+            type=['png', 'jpg', 'jpeg', 'bmp'],
+            help="Upload a clear photo of your QR code"
+        )
         
-        # Camera input
-        camera_image = st.camera_input("Position QR code in frame", key=f"camera_{st.session_state.scan_count}")
-        
-        if camera_image and not st.session_state.processing:
+        if uploaded_file and not st.session_state.processing:
             try:
                 st.session_state.processing = True
                 
+                # Read image
+                image = Image.open(uploaded_file)
+                
+                # Display preview
+                st.image(image, caption="Uploaded QR Code", use_container_width=True, width=200)
+                
                 # Decode QR code
-                bytes_data = camera_image.getvalue()
-                nparr = np.frombuffer(bytes_data, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                with st.spinner("🔍 Decoding QR code..."):
+                    if QR_SCANNER_AVAILABLE:
+                        qr_data = decode_qr_from_image(image)
+                    else:
+                        st.warning("QR scanner not available. Please use manual entry.")
+                        qr_data = None
                 
-                detector = cv2.QRCodeDetector()
-                data, bbox, _ = detector.detectAndDecode(img)
-                
-                if data:
-                    # Check for duplicate scan
-                    if data != st.session_state.last_processed_qr:
-                        st.session_state.last_processed_qr = data
+                if qr_data:
+                    # Check for duplicate
+                    if qr_data != st.session_state.last_processed_qr:
+                        st.session_state.last_processed_qr = qr_data
                         st.session_state.scan_count += 1
                         
-                        # Show detection notification
-                        st.toast("✅ QR Code detected! Processing...", icon="🔍")
-                        
                         # Process attendance
-                        success, message, student_name, details = process_attendance(data, mode)
+                        success, message, student_name, details = process_attendance(qr_data, mode)
                         
                         if success:
                             st.session_state.last_result = {
@@ -319,16 +332,15 @@ def scanner_page():
                                 'details': details
                             }
                         
-                        # Small delay to show result
                         time.sleep(1)
                         st.rerun()
                     else:
                         st.info("⏳ Same QR code detected - waiting for new scan...")
                 else:
-                    st.warning("No QR code detected. Please ensure the QR code is clearly visible.")
+                    st.error("No QR code detected in the image. Please try again or use manual entry.")
                     
             except Exception as e:
-                st.error(f"Camera error: {str(e)}")
+                st.error(f"Error processing image: {str(e)}")
             finally:
                 st.session_state.processing = False
         
@@ -340,9 +352,7 @@ def scanner_page():
             if result['success']:
                 if result['details']['type'] == 'check_in':
                     st.markdown(f"""
-                    <div class="success-box" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); 
-                                color: white; padding: 20px; border-radius: 15px; 
-                                text-align: center; margin: 20px 0;">
+                    <div class="success-box">
                         <h2 style="margin: 0;">✅ CHECK-IN SUCCESSFUL!</h2>
                         <p style="font-size: 1.5rem; margin: 10px 0;">{result['student_name']}</p>
                         <p style="font-size: 1rem; opacity: 0.9;">Time: {result['details']['time'].strftime('%I:%M:%S %p')}</p>
@@ -353,9 +363,7 @@ def scanner_page():
                     """, unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
-                    <div class="success-box" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%); 
-                                color: white; padding: 20px; border-radius: 15px; 
-                                text-align: center; margin: 20px 0;">
+                    <div class="success-box" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);">
                         <h2 style="margin: 0;">✅ CHECK-OUT SUCCESSFUL!</h2>
                         <p style="font-size: 1.5rem; margin: 10px 0;">{result['student_name']}</p>
                         <p style="font-size: 1rem; opacity: 0.9;">Duration: {result['details']['duration']}</p>
@@ -366,14 +374,12 @@ def scanner_page():
                     """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
-                <div style="background: #fef3c7; padding: 20px; border-radius: 15px; 
-                            border-left: 5px solid #f59e0b; margin: 20px 0;">
+                <div class="warning-box">
                     <h3 style="margin: 0; color: #92400e;">⚠️ {result['message']}</h3>
-                    {'<p style="margin: 5px 0;"><strong>Student:</strong> ' + result['student_name'] + '</p>' if result['student_name'] else ''}
+                    {f'<p style="margin: 5px 0;"><strong>Student:</strong> {result["student_name"]}</p>' if result['student_name'] else ''}
                 </div>
                 """, unsafe_allow_html=True)
             
-            # Add reset button
             if st.button("🔄 Scan Another QR Code", use_container_width=True):
                 st.session_state.last_result = None
                 st.session_state.last_processed_qr = None
@@ -384,8 +390,9 @@ def scanner_page():
         st.subheader("📝 Manual Code Entry")
         
         qr_data = st.text_input(
-            "Enter your QR code:",
+            "Enter your student code:",
             placeholder="Paste or type your student code here...",
+            help="You can find your student code on your QR code or in your registration email",
             key="manual_input"
         )
         
@@ -395,7 +402,7 @@ def scanner_page():
         
         if process_button and qr_data:
             with st.spinner("Processing..."):
-                success, message, student_name, details = process_attendance(qr_data, mode)
+                success, message, student_name, details = process_attendance(qr_data.upper(), mode)
                 
                 if success:
                     if details['type'] == 'check_in':
@@ -430,26 +437,26 @@ def scanner_page():
     
     with col1:
         st.markdown("""
-        **For Camera Scan:**
-        1. Position your QR code in front of the camera
-        2. Hold steady until detected
-        3. System will auto-process
+        **📷 Using QR Code Upload:**
+        1. Take a clear photo of your QR code
+        2. Upload the image
+        3. System will auto-detect and process
         4. Check your email for confirmation
         
-        **For Manual Entry:**
-        1. Copy your student code
-        2. Paste in the text box
+        **⌨️ Using Manual Entry:**
+        1. Find your student code
+        2. Type or paste it in the box
         3. Click "Process Attendance"
         4. Receive instant confirmation
         """)
     
     with col2:
-        st.markdown("""
-        **Operating Hours:**
-        - 🟢 **Check-in:** 7:00 PM - 11:59 PM
-        - 🟡 **Check-out:** 1:00 PM - 6:59 PM
+        st.markdown(f"""
+        **🕐 Operating Hours:**
+        - 🟢 **Check-in:** {CHECK_IN_START.strftime('%I:%M %p')} - {CHECK_IN_END.strftime('%I:%M %p')}
+        - 🟡 **Check-out:** {CHECK_OUT_START.strftime('%I:%M %p')} - {CHECK_OUT_END.strftime('%I:%M %p')}
         
-        **Important Notes:**
+        **⚠️ Important Notes:**
         - Each QR code is unique to you
         - Don't share your QR code
         - Keep your student code safe
